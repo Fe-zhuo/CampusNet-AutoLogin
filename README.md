@@ -1,8 +1,8 @@
 # Fe_z
-🛡️ CampusNet-AutoLogin | 专为 GDUF 校园网（10.82.0.0/16）Dr.COM 认证打造的永不掉线脚本，支持小米 4C / AX3000T，自动改 MAC 重连。 Anti-drop script for GDUF campus network, auto MAC-change &amp; re-login.
+🛡️ CampusNet-AutoLogin | 专为校园网（10.82.0.0/16）打造的永不掉线脚本，支持小米 4C / AX3000T，自动改 MAC 重连。 Anti-drop script for GDUF campus network, auto MAC-change &amp; re-login.
 
 
-以下是为 GitHub 开源准备的**校园网不掉线全自动方案**通用说明书。所有涉及真实网络环境的信息均已替换为占位符，并附有完整的抓包指引。
+以下是为 GitHub 开源准备的**校园网不掉线全自动方案**通用说明书 附有完整的抓包指引。
 
 ---
 
