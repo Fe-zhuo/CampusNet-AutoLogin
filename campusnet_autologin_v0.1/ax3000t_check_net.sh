@@ -2,6 +2,7 @@
 #===========================================================
 # 小米AX3000T 校园网自动登录脚本 (原厂固件)
 # 请先通过抓包修改以下 [ ] 包围的参数
+# 前提：已固化SSH，已在后台固定WAN口
 #===========================================================
 
 # ---------- 必须修改的参数 ----------
@@ -59,12 +60,13 @@ check_reboot_limit() {
     fi
 }
 
-# ========== 锁文件处理（永久解决残留） ==========
+# ========== 锁文件处理（绝对值比较，防时间回拨） ==========
 if [ -e "$LOCK_FILE" ]; then
     lock_age=$(($(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0)))
-    if [ "$lock_age" -gt 900 ]; then
+    [ "$lock_age" -lt 0 ] && lock_age=$(( -lock_age ))
+    if [ "$lock_age" -gt 300 ]; then
         rm -f "$LOCK_FILE"
-        log "$(timestamp) [维护] 清除过期锁文件（已存在 ${lock_age} 秒）"
+        log "$(timestamp) [维护] 清除过期锁文件"
     else
         exit 0
     fi
@@ -119,6 +121,7 @@ if [ "$CURRENT_TYPE" = "online" ]; then
     exit 0
 fi
 
+# ---------- 离线修复 ----------
 log "${NOW_STR} 检测到认证失效，修改MAC并重新获取IP..."
 NEW_MAC=$(random_mac)
 ifconfig $WAN_IF down
@@ -135,12 +138,10 @@ fi
 if [ -z "$IP" ]; then
     log "获取IP失败，尝试强制重启..."
     if check_reboot_limit; then
-        log "24小时内已重启${MAX_REBOOT}次，放弃操作，请手动检查网络。"
+        log "24小时内已重启${MAX_REBOOT}次，放弃操作。"
         save_state "offline" "$NOW" "1" "获取IP失败且达到重启上限"
         exit 1
     fi
-    uci set network.wan.macaddr="$(random_mac)"
-    uci commit network
     save_state "offline" "$NOW" "1" "获取IP失败强制重启"
     sync
     /sbin/reboot -f 2>/dev/null || busybox reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger
@@ -154,22 +155,8 @@ LOGIN_URL="${LOGIN_BASE}${LOGIN_PATH}?callback=dr1003&login_method=1&user_accoun
 RESULT=$(curl -s --connect-timeout 5 "$LOGIN_URL")
 
 if echo "$RESULT" | grep -q "$SUCCESS_STRING"; then
-    log "登录成功！"
-    sleep 3
-    if check_online; then
-        log "外网已恢复。"
-        save_state "online" "$NOW" "1" ""
-    else
-        log "登录返回成功但外网仍不通，尝试重启..."
-        if check_reboot_limit; then
-            log "24小时内已重启${MAX_REBOOT}次，放弃操作。"
-            save_state "offline" "$NOW" "1" "登录成功但无外网，达到重启上限"
-            exit 1
-        fi
-        save_state "offline" "$NOW" "1" "登录成功但无外网，强制重启"
-        sync
-        /sbin/reboot -f 2>/dev/null || busybox reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger
-    fi
+    log "登录成功！外网验证将由下一次定时任务完成。"
+    save_state "online" "$NOW" "1" ""
 else
     log "登录失败，返回: $RESULT"
     save_state "offline" "$NOW" "1" "登录失败"
