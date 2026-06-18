@@ -2,7 +2,7 @@
 #===========================================================
 # 小米AX3000T 校园网自动登录脚本 (原厂固件)
 # 请先通过抓包修改以下 [ ] 包围的参数
-# 前提：已固化SSH，已在后台固定WAN口
+# 使用进程检测防重复，永不卡锁
 #===========================================================
 
 # ---------- 必须修改的参数 ----------
@@ -16,14 +16,30 @@ SUCCESS_STRING="[登录成功关键词]"
 WAN_IF="eth0.1"                                 # 固定WAN口后通常为 eth0.1
 LOG_FILE="/data/auto_login.log"
 STATE_FILE="/data/check_net_state"
-LOCK_FILE="/data/check_net.lock"
-REBOOT_COUNT_FILE="/data/reboot_count"
-MAX_REBOOT=3
+
+# ---------- 固定备选 MAC 池 ----------
+# 建议 MAC1 填写当前 WAN 口真实 MAC，MAC2 为其变体
+MAC1="[你的真实MAC]"                             # 查看命令：ifconfig eth0.1 | grep HWaddr
+MAC2="[备选MAC]"                                 # 修改 MAC1 的最后一位
+MAC_POOL="$MAC1 $MAC2"
+MAC_IDX_FILE="/data/mac_idx"
 # ------------------------------------
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> $LOG_FILE; }
 timestamp() { date '+%Y-%m-%d %H:%M'; }
-random_mac() { printf "00:11:22:%02X:%02X:%02X" $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)); }
+
+get_next_mac() {
+    idx=$(cat "$MAC_IDX_FILE" 2>/dev/null || echo 0)
+    set -- $MAC_POOL
+    if [ "$idx" = "0" ]; then
+        echo "$MAC1"
+        echo 1 > "$MAC_IDX_FILE"
+    else
+        echo "$MAC2"
+        echo 0 > "$MAC_IDX_FILE"
+    fi
+}
+
 get_ip() { ifconfig $WAN_IF 2>/dev/null | grep 'inet addr' | awk -F: '{print $2}' | awk '{print $1}'; }
 get_mac() { ifconfig $WAN_IF 2>/dev/null | grep 'HWaddr' | awk '{print $5}' | tr -d ':'; }
 
@@ -35,45 +51,11 @@ read_state() { [ -f "$STATE_FILE" ] && cat "$STATE_FILE" || echo "init|0|0|"; }
 save_state() { echo "$1|$2|$3|$4" > "$STATE_FILE"; }
 ts2str() { date -d @$1 '+%Y-%m-%d %H:%M' 2>/dev/null || echo "unknown"; }
 
-check_reboot_limit() {
-    if [ -f "$REBOOT_COUNT_FILE" ]; then
-        local last=$(head -n1 "$REBOOT_COUNT_FILE")
-        local count=$(tail -n1 "$REBOOT_COUNT_FILE")
-        local now_ts=$(date +%s)
-        if [ $((now_ts - last)) -gt 86400 ]; then
-            echo "$now_ts" > "$REBOOT_COUNT_FILE"
-            echo "1" >> "$REBOOT_COUNT_FILE"
-            return 1
-        else
-            if [ "$count" -ge "$MAX_REBOOT" ]; then
-                return 0
-            else
-                echo "$last" > "$REBOOT_COUNT_FILE"
-                echo $((count + 1)) >> "$REBOOT_COUNT_FILE"
-                return 1
-            fi
-        fi
-    else
-        echo "$(date +%s)" > "$REBOOT_COUNT_FILE"
-        echo "1" >> "$REBOOT_COUNT_FILE"
-        return 1
-    fi
-}
-
-# ========== 锁文件处理（绝对值比较，防时间回拨） ==========
-if [ -e "$LOCK_FILE" ]; then
-    lock_age=$(($(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0)))
-    [ "$lock_age" -lt 0 ] && lock_age=$(( -lock_age ))
-    if [ "$lock_age" -gt 300 ]; then
-        rm -f "$LOCK_FILE"
-        log "$(timestamp) [维护] 清除过期锁文件"
-    else
-        exit 0
-    fi
+# ========== 防重复运行 (进程检测，无文件锁) ==========
+MY_PID=$$
+if ps | grep check_net.sh | grep -v grep | grep -v "$MY_PID" | grep -q check_net; then
+    exit 0
 fi
-
-touch "$LOCK_FILE"
-trap "rm -f $LOCK_FILE" EXIT
 
 # ========== 主流程 ==========
 OLD_STATE=$(read_state)
@@ -121,9 +103,8 @@ if [ "$CURRENT_TYPE" = "online" ]; then
     exit 0
 fi
 
-# ---------- 离线修复 ----------
-log "${NOW_STR} 检测到认证失效，修改MAC并重新获取IP..."
-NEW_MAC=$(random_mac)
+log "${NOW_STR} 检测到认证失效，使用固定备选MAC修复..."
+NEW_MAC=$(get_next_mac)
 ifconfig $WAN_IF down
 ifconfig $WAN_IF hw ether $NEW_MAC
 ifconfig $WAN_IF up
@@ -136,27 +117,25 @@ if [ -z "$IP" ]; then
 fi
 
 if [ -z "$IP" ]; then
-    log "获取IP失败，尝试强制重启..."
-    if check_reboot_limit; then
-        log "24小时内已重启${MAX_REBOOT}次，放弃操作。"
-        save_state "offline" "$NOW" "1" "获取IP失败且达到重启上限"
-        exit 1
-    fi
-    save_state "offline" "$NOW" "1" "获取IP失败强制重启"
-    sync
-    /sbin/reboot -f 2>/dev/null || busybox reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger
-    exit 0
+    log "获取IP失败，放弃本次修复。"
+    save_state "offline" "$NOW" "1" "获取IP失败"
+    exit 1
 fi
 
 log "成功获取IP: $IP，准备登录..."
-
 MAC=$(get_mac)
 LOGIN_URL="${LOGIN_BASE}${LOGIN_PATH}?callback=dr1003&login_method=1&user_account=${USER_ACCOUNT}&user_password=${USER_PASSWORD}&wlan_user_ip=${IP}&wlan_user_ipv6=&wlan_user_mac=${MAC}&wlan_ac_ip=${AC_IP}&wlan_ac_name=&jsVersion=4.2.1&terminal_type=1&lang=zh-cn&v=6008&lang=zh"
 RESULT=$(curl -s --connect-timeout 5 "$LOGIN_URL")
-
 if echo "$RESULT" | grep -q "$SUCCESS_STRING"; then
-    log "登录成功！外网验证将由下一次定时任务完成。"
-    save_state "online" "$NOW" "1" ""
+    log "登录成功！"
+    sleep 3
+    if check_online; then
+        log "外网已恢复。"
+        save_state "online" "$NOW" "1" ""
+    else
+        log "登录返回成功但外网仍不通。"
+        save_state "offline" "$NOW" "1" "登录成功但无外网"
+    fi
 else
     log "登录失败，返回: $RESULT"
     save_state "offline" "$NOW" "1" "登录失败"
